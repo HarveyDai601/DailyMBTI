@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, Dimensions, ScrollView } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { IRTModel, IRTItem } from '../irt/IRTModel';
+import { QuestionGenerator, Question } from '../irt/QuestionGenerator';
 
 const questionsJson = require('../../contents/questions.json');
 
@@ -13,50 +14,53 @@ type RootStackParamList = {
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Test'>;
 
-export const TestScreen: React.FC<Props> = ({ navigation }) => {
-  // flatten questions into list with dimension key
-  const allQuestions = useMemo(() => {
-    const dims = questionsJson.mbti_question_bank.dimensions as any[];
-    const flat: any[] = [];
-    for (const d of dims) {
-      // dimension_name like "E-I（外向-内向）"
-      // Extract prefix like E-I
-      const match = d.dimension_name.match(/[A-Z]-[A-Z]/);
-      const dimKey = match ? match[0] : d.dimension_name;
-      for (const q of d.questions) {
-        flat.push({ ...q, dimKey });
-      }
-    }
-    // take first 100
-    return flat.slice(0, 100);
-  }, []);
+const { width } = Dimensions.get('window');
 
-  const total = allQuestions.length;
-  const [index, setIndex] = useState(0);
-  const [selected, setSelected] = useState<number | null>(null);
+// Color constants
+const COLORS = {
+  background: '#F5F6FA',
+  optionBorder: {
+    5: '#03CB95', // 完全符合
+    4: '#6ADA7D', // 符合
+    3: '#C4CBCB', // 中间
+    2: '#FFB57F', // 不符合
+    1: '#FF8A80', // 完全不符合
+  },
+};
+
+export const TestScreen: React.FC<Props> = ({ navigation }) => {
+  const generator = useMemo(() => new QuestionGenerator(questionsJson), []);
+  const questionsPerPage = 5;
+  const allQuestions = useMemo(() => generator.generateQuestions({ totalQuestions: 100, questionsPerPage, shuffle: false }), [generator]);
+  const totalPages = useMemo(() => generator.getTotalPages(allQuestions.length, questionsPerPage), [allQuestions.length, questionsPerPage]);
+
+  const [currentPage, setCurrentPage] = useState(0);
   const [answers, setAnswers] = useState<{ [qid: string]: number }>({});
 
   useEffect(() => {
-    // disable back gestures by setting options
     navigation.setOptions({ headerLeft: () => null, gestureEnabled: false });
   }, [navigation]);
 
-  const current = allQuestions[index];
+  const currentQuestions = allQuestions.slice(currentPage * questionsPerPage, (currentPage + 1) * questionsPerPage);
+  const completedQuestions = Object.keys(answers).length;
+  const progress = completedQuestions / allQuestions.length;
+
+  const isPageComplete = currentQuestions.every(q => answers[q.qid] != null);
+
+  const onSelect = (qid: string, value: number) => {
+    setAnswers(prev => ({ ...prev, [qid]: value }));
+  };
 
   const onNext = () => {
-    if (selected == null) {
-      Alert.alert('请先选择一个选项');
+    if (!isPageComplete) {
+      Alert.alert('请完成本页所有题目');
       return;
     }
-    const newAnswers = { ...answers, [current.qid]: selected };
-    setAnswers(newAnswers);
-    setSelected(null);
-    if (index + 1 >= total) {
+    if (currentPage + 1 >= totalPages) {
       // finish and compute MBTI
-      // group items by dimension
       const byDim: { [dimKey: string]: IRTItem[] } = {};
       for (const q of allQuestions) {
-        const sc = q.scoring_rule && q.scoring_rule.score_mapping ? q.scoring_rule.score_mapping : { '1': 0, '2': 0.25, '3': 0.5, '4': 0.75, '5': 1 };
+        const sc = q.scoring_rule.score_mapping || { '1': 0, '2': 0.25, '3': 0.5, '4': 0.75, '5': 1 };
         const item: IRTItem = {
           qid: q.qid,
           a: q.irt_params.a,
@@ -66,67 +70,107 @@ export const TestScreen: React.FC<Props> = ({ navigation }) => {
         if (!byDim[q.dimKey]) byDim[q.dimKey] = [];
         byDim[q.dimKey].push(item);
       }
-      // compute
-      const result = IRTModel.computeMBTI(byDim, newAnswers);
+      const result = IRTModel.computeMBTI(byDim, answers);
       navigation.replace('Result', { code: result.code, summary: result.summary });
     } else {
-      setIndex(index + 1);
+      setCurrentPage(currentPage + 1);
     }
   };
 
   return (
     <View style={styles.container}>
-      <Text style={styles.qCount}>第 {index + 1} 题 / 共 {total} 题</Text>
-      <View style={styles.card}>
-        <Text style={styles.question}>{current.question_text}</Text>
-        <View style={styles.options}>
-          {[1, 2, 3, 4, 5].map(k => (
-            <TouchableOpacity
-              key={k}
-              style={[styles.option, selected === k && styles.optionSelected]}
-              onPress={() => setSelected(k)}
-            >
-              <Text style={[styles.optionText, selected === k && styles.optionTextSelected]}>{k}</Text>
-              <Text style={styles.optionLabel}>{getOptionLabel(k)}</Text>
-            </TouchableOpacity>
-          ))}
+      <View style={styles.progressContainer}>
+        <Text style={styles.qCount}>第 {currentPage + 1} 页 / 共 {totalPages} 页 ({completedQuestions}/{allQuestions.length})</Text>
+        <View style={styles.progressBar}>
+          <View style={[styles.progressFill, { width: width * 0.8 * progress }]} />
         </View>
-        <TouchableOpacity style={styles.nextButton} onPress={onNext}>
-          <Text style={styles.nextText}>{index + 1 >= total ? '提交并计算' : '下一题'}</Text>
-        </TouchableOpacity>
       </View>
+      <ScrollView style={styles.scrollView}>
+        {currentQuestions.map((q, idx) => (
+          <View key={q.qid} style={styles.questionCard}>
+            <Text style={styles.questionText}>{q.question_text}</Text>
+            <View style={styles.optionsRow}>
+              {[5, 4, 3, 2, 1].map(k => (
+                <TouchableOpacity
+                  key={k}
+                  style={[
+                    styles.optionCircle,
+                    { 
+                        backgroundColor: getOptionFillColor(k),
+                        borderColor: getOptionsBorderColor(k),
+                    },
+                    answers[q.qid] === k && styles.optionSelected,
+                  ]}
+                  onPress={() => onSelect(q.qid, k)}
+                />
+              ))}
+            </View>
+          </View>
+        ))}
+      </ScrollView>
+      <TouchableOpacity
+        style={[styles.nextButton, !isPageComplete && styles.nextButtonDisabled]}
+        onPress={onNext}
+        disabled={!isPageComplete}
+      >
+        <Text style={styles.nextText}>
+          {currentPage + 1 >= totalPages ? '提交并计算' : '下一页'}
+        </Text>
+      </TouchableOpacity>
     </View>
   );
 };
 
-function getOptionLabel(k: number) {
-  switch (k) {
-    case 1:
-      return '非常不符合';
-    case 2:
-      return '不符合';
-    case 3:
-      return '不确定';
-    case 4:
-      return '符合';
-    case 5:
-      return '非常符合';
-    default:
-      return '';
-  }
+function getOptionFillColor(k: number): string {
+  const hex = COLORS.optionBorder[k as keyof typeof COLORS.optionBorder];
+  // Convert hex to rgba with 0.8 opacity
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, 0.3)`;
+}
+
+function getOptionsBorderColor(k: number): string {
+  return COLORS.optionBorder[k as keyof typeof COLORS.optionBorder];
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 16, backgroundColor: '#fff' },
+  progressContainer: { marginBottom: 16, backgroundColor: COLORS.background, padding: 16, borderRadius: 8 },
   qCount: { textAlign: 'center', marginBottom: 8, fontSize: 14, color: '#666' },
-  card: { backgroundColor: '#f8f8f8', padding: 16, borderRadius: 8 },
-  question: { fontSize: 18, marginBottom: 12 },
-  options: { marginTop: 8 },
-  option: { flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 6, borderWidth: 1, borderColor: '#ddd', marginBottom: 8 },
-  optionSelected: { backgroundColor: '#007aff22', borderColor: '#007AFF' },
-  optionText: { width: 28, fontWeight: '700', color: '#333' },
-  optionTextSelected: { color: '#007AFF' },
-  optionLabel: { marginLeft: 8, color: '#333' },
+  progressBar: {
+    height: 8,
+    backgroundColor: '#e0e0e0',
+    borderRadius: 4,
+    width: width * 0.8,
+    alignSelf: 'center',
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#007AFF',
+    borderRadius: 4,
+  },
+  scrollView: { flex: 1, backgroundColor: COLORS.background },
+  questionCard: {
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
+  },
+  questionText: { fontSize: 16, marginBottom: 12 },
+  optionsRow: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center' },
+  optionCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 2,
+  },
+  optionSelected: {
+    borderWidth: 4,
+  },
   nextButton: { marginTop: 12, backgroundColor: '#007AFF', padding: 12, borderRadius: 8, alignItems: 'center' },
+  nextButtonDisabled: { backgroundColor: '#ccc' },
   nextText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 });
